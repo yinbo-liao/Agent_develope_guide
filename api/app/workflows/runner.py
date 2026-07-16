@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 
@@ -13,6 +14,22 @@ from app.workflows.graph import workflow_graph
 from app.workflows.state import WorkflowStatus
 
 logger = logging.getLogger(__name__)
+
+# Exceptions that should trigger a retry (transient errors)
+RETRYABLE_EXCEPTIONS = (
+    TimeoutError,
+    ConnectionError,
+    asyncio.TimeoutError,
+    OSError,  # network-level failures
+)
+
+# Exceptions that should NOT be retried (permanent errors)
+FATAL_EXCEPTIONS = (
+    ValueError,
+    TypeError,
+    KeyError,
+    AttributeError,
+)
 
 
 def apply_updates(run: WorkflowRun, updates: dict[str, object]) -> None:
@@ -55,37 +72,73 @@ async def execute_workflow(session: AsyncSession, task_id: str) -> WorkflowRun:
     await session.refresh(run)
     await broadcast_workflow_snapshot(run, "workflow_start", {"message": "Workflow queued"})
 
-    try:
-        steps = await workflow_graph.execute(run)
-        for step in steps:
-            apply_updates(run, step)
-            await broadcast_workflow_snapshot(
-                run,
-                "step",
-                {
-                    "stepName": run.current_step,
-                    "stepStatus": run.current_status,
-                    "reviewData": {
-                        "factors": run.risk_factors,
-                        "deadline": run.review_deadline.isoformat() if run.review_deadline else None,
+    while run.retry_count <= run.max_retries:
+        try:
+            steps = await workflow_graph.execute(run)
+            for step in steps:
+                apply_updates(run, step)
+                await broadcast_workflow_snapshot(
+                    run,
+                    "step",
+                    {
+                        "stepName": run.current_step,
+                        "stepStatus": run.current_status,
+                        "reviewData": {
+                            "factors": run.risk_factors,
+                            "deadline": (
+                                run.review_deadline.isoformat()
+                                if run.review_deadline
+                                else None
+                            ),
+                        },
                     },
-                },
+                )
+            await session.commit()
+            await session.refresh(run)
+            await broadcast_workflow_snapshot(run, "workflow_complete")
+            return run
+
+        except FATAL_EXCEPTIONS:
+            # Permanent errors — do not retry
+            logger.exception("Fatal workflow error for %s", task_id)
+            run.current_status = WorkflowStatus.FAILED.value
+            run.current_step = "workflow_error"
+            run.retry_count += 1  # mark the attempt
+            run.updated_at = datetime.now(timezone.utc)
+            await session.commit()
+            await session.refresh(run)
+            await broadcast_workflow_snapshot(run, "error")
+            return run
+
+        except Exception as exc:
+            run.retry_count += 1
+            logger.warning(
+                "Workflow %s attempt %d/%d failed: %s",
+                task_id,
+                run.retry_count,
+                run.max_retries + 1,
+                exc,
             )
-        await session.commit()
-        await session.refresh(run)
-        await broadcast_workflow_snapshot(run, "workflow_complete")
-        return run
-    except Exception as exc:
-        logger.exception("Workflow execution failed for %s", task_id)
-        run.current_status = WorkflowStatus.FAILED.value
-        run.current_step = "workflow_error"
-        run.error_info = str(exc)
-        run.retry_count += 1
-        run.updated_at = datetime.now(timezone.utc)
-        await session.commit()
-        await session.refresh(run)
-        await broadcast_workflow_snapshot(run, "error")
-        return run
+
+            if run.retry_count > run.max_retries:
+                logger.error("Workflow %s exhausted all retries", task_id)
+                run.current_status = WorkflowStatus.FAILED.value
+                run.current_step = "workflow_error"
+                run.error_info = f"Exhausted {run.max_retries} retries. Last error: {exc}"
+                run.updated_at = datetime.now(timezone.utc)
+                await session.commit()
+                await session.refresh(run)
+                await broadcast_workflow_snapshot(run, "error")
+                return run
+
+            # Exponential backoff with jitter: delay = min(2^retry, 60) seconds
+            delay = min(2 ** run.retry_count, 60)
+            logger.info("Retrying workflow %s in %ds...", task_id, delay)
+            run.error_info = f"Retry {run.retry_count}/{run.max_retries}: {exc}"
+            run.updated_at = datetime.now(timezone.utc)
+            await session.commit()
+            await broadcast_workflow_snapshot(run, "step", {"stepName": "retry", "stepStatus": "retrying"})
+            await asyncio.sleep(delay)
 
 
 async def run_workflow_in_new_session(task_id: str) -> None:

@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
-from app.api.v1 import cost, events, health, human_review, mcp, workflows
+from app.api.v1 import auth, cost, events, health, human_review, mcp, workflows
 from app.core.config import settings
 from app.core.database import close_db, init_db
 from app.core.logging import setup_logging
@@ -21,6 +21,16 @@ from app.middleware.security import SecurityHeadersMiddleware
 
 setup_logging()
 logger = logging.getLogger(__name__)
+
+# Validate production secrets at import time — refuse to start with insecure defaults
+_production_errors = settings.validate_production_secrets()
+if _production_errors:
+    for error in _production_errors:
+        logger.critical("Production secret validation FAILED: %s", error)
+    raise RuntimeError(
+        "Insecure default secrets detected in production. "
+        "Set proper values for: " + ", ".join(_production_errors)
+    )
 
 
 @asynccontextmanager
@@ -68,6 +78,7 @@ def create_application() -> FastAPI:
     async def root() -> dict[str, str]:
         return {"name": settings.APP_NAME, "version": settings.APP_VERSION}
 
+    app.include_router(auth.router, prefix=settings.API_PREFIX)
     app.include_router(health.router, prefix="/health", tags=["Health"])
     app.include_router(workflows.router, prefix=settings.API_PREFIX)
     app.include_router(events.router, prefix=settings.API_PREFIX)

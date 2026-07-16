@@ -1,0 +1,73 @@
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+
+from app.core.config import settings
+
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60
+REFRESH_TOKEN_EXPIRE_DAYS = 7
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+def hash_password(password: str) -> str:
+    return pwd_context.hash(password)
+
+
+def create_access_token(
+    subject: str,
+    expires_delta: timedelta | None = None,
+    extra_claims: dict[str, Any] | None = None,
+) -> str:
+    """Create a JWT access token for the given subject (user_id)."""
+    now = datetime.now(timezone.utc)
+    expire = now + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    claims: dict[str, Any] = {
+        "sub": subject,
+        "iat": now,
+        "exp": expire,
+        "jti": str(uuid.uuid4()),
+        "type": "access",
+    }
+    if extra_claims:
+        claims.update(extra_claims)
+    return jwt.encode(claims, settings.SECRET_KEY, algorithm=ALGORITHM)
+
+
+def create_refresh_token(subject: str) -> str:
+    """Create a long-lived refresh token."""
+    now = datetime.now(timezone.utc)
+    expire = now + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    claims = {
+        "sub": subject,
+        "iat": now,
+        "exp": expire,
+        "jti": str(uuid.uuid4()),
+        "type": "refresh",
+    }
+    return jwt.encode(claims, settings.SECRET_KEY, algorithm=ALGORITHM)
+
+
+def decode_token(token: str) -> dict[str, Any]:
+    """Decode and validate a JWT token. Raises JWTError on failure."""
+    return jwt.decode(token, settings.SECRET_KEY, algorithms=[ALGORITHM])
+
+
+def create_api_key() -> str:
+    """Generate a cryptographically random API key for M2M auth."""
+    return f"ak_{uuid.uuid4().hex}{uuid.uuid4().hex}"
+
+
+def hash_api_key(api_key: str) -> str:
+    """Hash an API key for storage (prefix is preserved for identification)."""
+    return pwd_context.hash(api_key)

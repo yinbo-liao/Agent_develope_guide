@@ -4,7 +4,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from app.core.circuit_breaker import CircuitBreaker
+from app.core.circuit_breaker import breaker_registry
 from app.core.metrics import track_llm_cost
 from app.models.workflow import WorkflowRun
 from app.services.cost_governor import cost_governor
@@ -12,8 +12,6 @@ from app.services.llm_client import LLMClient
 from app.services.model_router import model_router
 from app.services.vector_store import retrieve_context
 from app.workflows.state import RiskLevel, WorkflowStatus
-
-llm_circuit_breaker = CircuitBreaker(failure_threshold=3, recovery_timeout=30)
 
 
 async def validate_input(run: WorkflowRun) -> dict[str, Any]:
@@ -112,13 +110,15 @@ async def auto_generate_response(run: WorkflowRun) -> dict[str, Any]:
             "updated_at": datetime.now(timezone.utc),
         }
 
-    async with llm_circuit_breaker:
+    model_name = str(model_choice["model"])
+    breaker = breaker_registry.get_llm_breaker(model_name)
+    async with breaker:
         response = await LLMClient.generate(
             prompt=run.input_query,
             context=run.retrieval_results or [],
             max_tokens=max(256, run.token_budget - run.total_tokens_used),
             temperature=0.2,
-            model=str(model_choice["model"]),
+            model=model_name,
         )
 
     cost_governor.record_usage(
@@ -161,13 +161,16 @@ async def complex_analysis(run: WorkflowRun) -> dict[str, Any]:
             "updated_at": datetime.now(timezone.utc),
         }
 
-    response = await LLMClient.generate(
-        prompt=f"Provide a more careful operational analysis for: {run.input_query}",
-        context=run.retrieval_results or [],
-        max_tokens=max(512, run.token_budget - run.total_tokens_used),
-        temperature=0.1,
-        model=str(model_choice["model"]),
-    )
+    model_name = str(model_choice["model"])
+    breaker = breaker_registry.get_llm_breaker(model_name)
+    async with breaker:
+        response = await LLMClient.generate(
+            prompt=f"Provide a more careful operational analysis for: {run.input_query}",
+            context=run.retrieval_results or [],
+            max_tokens=max(512, run.token_budget - run.total_tokens_used),
+            temperature=0.1,
+            model=model_name,
+        )
     cost_governor.record_usage(
         user_id=run.user_id,
         task_id=run.id,

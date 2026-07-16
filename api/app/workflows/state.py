@@ -34,8 +34,8 @@ class WorkflowEvent(BaseModel):
 
 
 class WorkflowCreateRequest(BaseModel):
-    user_id: str
     input_query: str = Field(min_length=3, max_length=10_000)
+    user_id: str | None = None  # Deprecated: overridden by JWT auth
     session_id: str | None = None
     token_budget: int = Field(default=10_000, ge=1000, le=200_000)
     cost_budget_usd: float = Field(default=5.0, ge=0.0, le=500.0)

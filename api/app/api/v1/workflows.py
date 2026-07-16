@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db_session
+from app.core.deps import get_current_user, get_optional_user
 from app.core.websocket_manager import ws_manager
 from app.models.workflow import WorkflowRun
 from app.workflows.runner import run_workflow_in_new_session
@@ -28,10 +29,11 @@ async def create_workflow(
     payload: WorkflowCreateRequest,
     background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_db_session),
+    current_user: dict[str, object] = Depends(get_current_user),
 ) -> WorkflowSummary:
     workflow = WorkflowRun(
         id=str(uuid.uuid4()),
-        user_id=payload.user_id,
+        user_id=str(current_user["user_id"]),
         session_id=payload.session_id,
         input_query=payload.input_query,
         token_budget=payload.token_budget,
@@ -57,12 +59,12 @@ async def create_workflow(
 
 @router.get("", response_model=list[WorkflowSummary])
 async def list_workflows(
-    user_id: str | None = None,
     session: AsyncSession = Depends(get_db_session),
+    current_user: dict[str, object] = Depends(get_current_user),
 ) -> list[WorkflowSummary]:
-    stmt = select(WorkflowRun).order_by(WorkflowRun.created_at.desc())
-    if user_id:
-        stmt = stmt.where(WorkflowRun.user_id == user_id)
+    stmt = select(WorkflowRun).where(
+        WorkflowRun.user_id == str(current_user["user_id"])
+    ).order_by(WorkflowRun.created_at.desc())
 
     result = await session.execute(stmt)
     runs = result.scalars().all()
@@ -73,9 +75,10 @@ async def list_workflows(
 async def get_workflow(
     task_id: str,
     session: AsyncSession = Depends(get_db_session),
+    current_user: dict[str, object] = Depends(get_current_user),
 ) -> WorkflowDetail:
     result = await session.execute(select(WorkflowRun).where(WorkflowRun.id == task_id))
     run = result.scalar_one_or_none()
-    if run is None:
+    if run is None or run.user_id != str(current_user["user_id"]):
         raise HTTPException(status_code=404, detail="Workflow not found")
     return to_detail(run)

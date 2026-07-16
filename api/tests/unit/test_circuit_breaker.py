@@ -25,7 +25,7 @@ async def test_circuit_breaker_opens_after_threshold() -> None:
                 raise ValueError("Simulated failure")
 
     # Third call should be blocked because the breaker is open
-    with pytest.raises(RuntimeError, match="Circuit breaker is open"):
+    with pytest.raises(RuntimeError, match="CircuitBreaker"):
         async with breaker:
             pass
 

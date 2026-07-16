@@ -153,3 +153,31 @@ def mock_opa_client() -> MagicMock:
     )
     opa.check_scope = AsyncMock(return_value=True)
     return opa
+
+
+# ---------------------------------------------------------------------------
+# Auth helpers for tests
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def auth_headers(test_settings: Any) -> dict[str, str]:
+    """Return Authorization headers with a valid test JWT."""
+    from app.security.auth import create_access_token  # noqa: E402
+
+    token = create_access_token(
+        subject="test-user-id",
+        extra_claims={"role": "admin", "tier": "professional"},
+    )
+    return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture
+def viewer_auth_headers(test_settings: Any) -> dict[str, str]:
+    """Return Authorization headers for a viewer-role user."""
+    from app.security.auth import create_access_token  # noqa: E402
+
+    token = create_access_token(
+        subject="viewer-user-id",
+        extra_claims={"role": "viewer", "tier": "free"},
+    )
+    return {"Authorization": f"Bearer {token}"}

@@ -14,15 +14,18 @@ class Settings(BaseSettings):
     DEBUG: bool = True
 
     API_PREFIX: str = "/api/v1"
-    SECRET_KEY: str = Field(default="dev-secret-change-me", min_length=16)
+    SECRET_KEY: str = Field(
+        default="dev-secret-change-me-in-prod-override",
+        min_length=16,
+    )
     CORS_ORIGINS: list[str] = Field(
         default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"]
     )
 
-    DATABASE_URL: str = (
-        "postgresql+asyncpg://aiwf:changeme_in_production@localhost:5432/aiwf_dev"
+    DATABASE_URL: str = Field(
+        default="postgresql+asyncpg://aiwf:changeme_in_production@localhost:5432/aiwf_dev",
     )
-    REDIS_URL: str = "redis://:changeme@localhost:6379/0"
+    REDIS_URL: str = Field(default="redis://:changeme@localhost:6379/0")
     OPA_URL: str = "http://opa:8181"
     OTEL_EXPORTER_OTLP_ENDPOINT: str = "http://localhost:4317"
 
@@ -50,6 +53,34 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.ENVIRONMENT == "production"
+
+    def validate_production_secrets(self) -> list[str]:
+        """Validate that no insecure default secrets are used in production.
+
+        Returns a list of validation error messages (empty = all clear).
+        """
+        errors: list[str] = []
+        if not self.is_production:
+            return errors
+
+        insecure_defaults = {
+            "SECRET_KEY": "dev-secret-change-me-in-prod-override",
+            "DATABASE_URL": "changeme_in_production",
+            "REDIS_URL": "changeme",
+        }
+        for field_name, insecure_marker in insecure_defaults.items():
+            value = getattr(self, field_name, "")
+            if isinstance(value, str) and insecure_marker in value:
+                errors.append(
+                    f"{field_name} contains an insecure default value. "
+                    f"Set {field_name} to a production-safe value."
+                )
+
+        if self.SECRET_KEY and len(self.SECRET_KEY) < 32:
+            errors.append(
+                "SECRET_KEY must be at least 32 characters in production."
+            )
+        return errors
 
 
 @lru_cache(maxsize=1)
