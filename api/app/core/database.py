@@ -17,7 +17,7 @@ _engine_kwargs: dict[str, object] = {
 }
 # pool_size/max_overflow are PostgreSQL-specific; skip for SQLite (testing)
 if "sqlite" not in settings.DATABASE_URL:
-    _engine_kwargs.update({"pool_size": 10, "max_overflow": 20})
+    _engine_kwargs.update({"pool_size": 10, "max_overflow": 20, "pool_timeout": 5})
 
 engine: AsyncEngine = create_async_engine(settings.DATABASE_URL, **_engine_kwargs)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)

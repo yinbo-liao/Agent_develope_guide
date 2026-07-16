@@ -7,6 +7,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db_session
+from app.core.dead_letter import (
+    get as dlq_get,
+    list_entries as dlq_list,
+    mark_replayed as dlq_mark_replayed,
+    serialize_entry as dlq_serialize,
+)
 from app.core.deps import get_current_user, get_optional_user
 from app.core.websocket_manager import ws_manager
 from app.models.workflow import WorkflowRun
@@ -82,3 +88,45 @@ async def get_workflow(
     if run is None or run.user_id != str(current_user["user_id"]):
         raise HTTPException(status_code=404, detail="Workflow not found")
     return to_detail(run)
+
+
+# ---------------------------------------------------------------------------
+# Dead Letter Queue
+# ---------------------------------------------------------------------------
+
+@router.get("/dlq/entries", response_model=list[dict[str, object]])
+async def list_dlq_entries(
+    current_user: dict[str, object] = Depends(get_current_user),
+) -> list[dict[str, object]]:
+    """List dead-letter-queued workflows for the authenticated user."""
+    return dlq_list(user_id=str(current_user["user_id"]))
+
+
+@router.post("/dlq/{dlq_id}/replay", status_code=status.HTTP_202_ACCEPTED)
+async def replay_dlq_entry(
+    dlq_id: str,
+    background_tasks: BackgroundTasks,
+    session: AsyncSession = Depends(get_db_session),
+    current_user: dict[str, object] = Depends(get_current_user),
+) -> dict[str, object]:
+    """Replay a dead-lettered workflow as a new workflow run."""
+    entry = dlq_get(dlq_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="DLQ entry not found")
+    if entry.get("user_id") != str(current_user["user_id"]):
+        raise HTTPException(status_code=404, detail="DLQ entry not found")
+
+    payload = dlq_serialize(entry)
+    workflow = WorkflowRun(
+        id=str(uuid.uuid4()),
+        user_id=payload["user_id"],
+        input_query=payload["input_query"],
+        token_budget=payload["token_budget"],
+        cost_budget_usd=payload["cost_budget_usd"],
+    )
+    session.add(workflow)
+    await session.commit()
+    await session.refresh(workflow)
+    dlq_mark_replayed(dlq_id)
+    background_tasks.add_task(run_workflow_in_new_session, workflow.id)
+    return {"status": "replayed", "new_task_id": workflow.id}

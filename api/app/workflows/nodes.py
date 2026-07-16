@@ -92,12 +92,12 @@ async def assess_risk(run: WorkflowRun) -> dict[str, Any]:
 
 
 async def auto_generate_response(run: WorkflowRun) -> dict[str, Any]:
-    model_choice = model_router.select_model(
+    model_choice = await model_router.select_model(
         user_id=run.user_id,
         task_complexity="fast",
         estimated_tokens=max(256, run.token_budget - run.total_tokens_used),
     )
-    allowed, budget_status = cost_governor.check_budget(
+    allowed, budget_status = await cost_governor.check_budget(
         run.user_id,
         estimated_tokens=max(256, run.token_budget - run.total_tokens_used),
         estimated_cost=float(model_choice["estimated_cost"]),
@@ -121,7 +121,7 @@ async def auto_generate_response(run: WorkflowRun) -> dict[str, Any]:
             model=model_name,
         )
 
-    cost_governor.record_usage(
+    await cost_governor.record_usage(
         user_id=run.user_id,
         task_id=run.id,
         tokens=response["tokens_used"],
@@ -143,12 +143,12 @@ async def auto_generate_response(run: WorkflowRun) -> dict[str, Any]:
 
 async def complex_analysis(run: WorkflowRun) -> dict[str, Any]:
     complexity = "complex" if run.risk_level == RiskLevel.HIGH.value else "medium"
-    model_choice = model_router.select_model(
+    model_choice = await model_router.select_model(
         user_id=run.user_id,
         task_complexity=complexity,
         estimated_tokens=max(512, run.token_budget - run.total_tokens_used),
     )
-    allowed, budget_status = cost_governor.check_budget(
+    allowed, budget_status = await cost_governor.check_budget(
         run.user_id,
         estimated_tokens=max(512, run.token_budget - run.total_tokens_used),
         estimated_cost=float(model_choice["estimated_cost"]),
@@ -171,7 +171,7 @@ async def complex_analysis(run: WorkflowRun) -> dict[str, Any]:
             temperature=0.1,
             model=model_name,
         )
-    cost_governor.record_usage(
+    await cost_governor.record_usage(
         user_id=run.user_id,
         task_id=run.id,
         tokens=response["tokens_used"],

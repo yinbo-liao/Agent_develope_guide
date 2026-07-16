@@ -25,6 +25,7 @@ class RedisWebSocketManager:
         self.pubsub: redis.client.PubSub | None = None
         self.local_connections: dict[str, set[WebSocket]] = defaultdict(set)
         self._listener_task: asyncio.Task[None] | None = None
+        self._cleanup_task: asyncio.Task[None] | None = None
         self._initialized = False
 
     async def connect(self) -> None:
@@ -37,14 +38,43 @@ class RedisWebSocketManager:
             self.pubsub = self.redis_client.pubsub()
             await self.pubsub.psubscribe("task:*")
             self._listener_task = asyncio.create_task(self._redis_listener())
+            # Periodic cleanup of orphaned task_id entries (every 5 minutes)
+            self._cleanup_task = asyncio.create_task(self._periodic_cleanup())
             logger.info("WebSocket manager connected with Redis pub/sub")
         except Exception:
             logger.warning("Redis pub/sub unavailable; WebSocket manager using local-only mode")
             self.redis_client = None
             self.pubsub = None
             self._listener_task = None
+            self._cleanup_task = asyncio.create_task(self._periodic_cleanup())
         finally:
             self._initialized = True
+
+    async def _periodic_cleanup(self) -> None:
+        """Remove orphaned task_id keys that have only stale/disconnected sockets."""
+        while True:
+            await asyncio.sleep(300)  # every 5 minutes
+            orphaned: list[str] = []
+            for task_id, sockets in self.local_connections.items():
+                # Remove disconnected sockets from each set
+                stale = [ws for ws in sockets if ws.client_state != WebSocketState.CONNECTED]
+                for s in stale:
+                    sockets.discard(s)
+                # If the set is now empty, mark for removal
+                if not sockets:
+                    orphaned.append(task_id)
+            for task_id in orphaned:
+                self.local_connections.pop(task_id, None)
+            if orphaned:
+                logger.debug("Cleaned up %d orphaned WebSocket task_id entries", len(orphaned))
+
+    async def _cancel_cleanup(self) -> None:
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
 
     async def disconnect(self) -> None:
         if self._listener_task:
@@ -53,6 +83,8 @@ class RedisWebSocketManager:
                 await self._listener_task
             except asyncio.CancelledError:
                 pass
+
+        await self._cancel_cleanup()
 
         if self.pubsub:
             await self.pubsub.punsubscribe()
@@ -135,7 +167,7 @@ class RedisWebSocketManager:
         await self._forward_to_local(task_id, enriched)
 
     async def event_stream(self, task_id: str) -> AsyncGenerator[dict[str, object], None]:
-        queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+        queue: asyncio.Queue[dict[str, object]] = asyncio.Queue(maxsize=100)
 
         class QueueSocket:
             client_state = WebSocketState.CONNECTED

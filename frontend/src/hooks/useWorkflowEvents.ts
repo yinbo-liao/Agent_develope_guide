@@ -3,6 +3,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { runtimeConfig } from "../lib/runtime";
 import type { TransportType, WorkflowEvent, WorkflowState } from "../types/workflow";
 
+const MAX_RECONNECT_ATTEMPTS = 5;
+const BASE_DELAY_MS = 1000;
+const MAX_DELAY_MS = 30000;
+
 const emptyState = (taskId: string): WorkflowState => ({
   taskId,
   status: "idle",
@@ -18,6 +22,13 @@ const emptyState = (taskId: string): WorkflowState => ({
   connected: false,
 });
 
+function backoffDelay(attempt: number): number {
+  const exponential = Math.min(MAX_DELAY_MS, BASE_DELAY_MS * Math.pow(2, attempt));
+  // Add jitter: ±25%
+  const jitter = exponential * 0.25 * (Math.random() * 2 - 1);
+  return Math.round(exponential + jitter);
+}
+
 export function useWorkflowEvents(
   taskId: string | null,
   preferredTransport: TransportType = "auto",
@@ -25,8 +36,14 @@ export function useWorkflowEvents(
   const [state, setState] = useState<WorkflowState>(emptyState(taskId ?? ""));
   const wsRef = useRef<WebSocket | null>(null);
   const sseRef = useRef<EventSource | null>(null);
+  const reconnectAttemptRef = useRef(0);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const disconnect = useCallback(() => {
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
     wsRef.current?.close();
     sseRef.current?.close();
     wsRef.current = null;
@@ -136,23 +153,41 @@ export function useWorkflowEvents(
       steps: current.taskId === taskId ? current.steps : [],
     }));
     disconnect();
+    reconnectAttemptRef.current = 0;
+
+    const scheduleReconnect = (
+      label: string,
+      connectFn: () => void,
+      maxAttempts: number = MAX_RECONNECT_ATTEMPTS,
+      onExhausted?: () => void,
+    ) => {
+      if (reconnectAttemptRef.current >= maxAttempts) {
+        reconnectAttemptRef.current = 0;
+        onExhausted?.();
+        return;
+      }
+      const delay = backoffDelay(reconnectAttemptRef.current);
+      reconnectAttemptRef.current += 1;
+      setState((current) => ({ ...current, transport: "connecting" }));
+      reconnectTimerRef.current = setTimeout(() => {
+        connectFn();
+      }, delay);
+    };
 
     const connectSse = () => {
       const sse = new EventSource(`${runtimeConfig.apiBase}/api/v1/events/sse/${taskId}`);
       sseRef.current = sse;
-      setState((current) => ({ ...current, transport: "sse" }));
+      setState((current) => ({ ...current, transport: "sse", connected: true }));
+      reconnectAttemptRef.current = 0;
 
       sse.onmessage = (message) => {
         processEvent(JSON.parse(message.data) as WorkflowEvent);
       };
-      sse.onerror = async () => {
+      sse.onerror = () => {
         sse.close();
         setState((current) => ({ ...current, connected: false }));
-        try {
-          await fetchState();
-        } catch {
-          // No-op; the dashboard keeps the latest known state.
-        }
+        // Attempt SSE reconnection with backoff
+        scheduleReconnect("SSE", connectSse);
       };
     };
 
@@ -175,6 +210,8 @@ export function useWorkflowEvents(
         processEvent(JSON.parse(message.data) as WorkflowEvent);
       };
       websocket.onopen = async () => {
+        reconnectAttemptRef.current = 0;
+        setState((current) => ({ ...current, connected: true }));
         try {
           await fetchState();
         } catch {
@@ -187,12 +224,18 @@ export function useWorkflowEvents(
       websocket.onclose = () => {
         setState((current) => ({ ...current, connected: false }));
         if (preferredTransport === "websocket") {
+          // Retry WebSocket with backoff, then give up
+          scheduleReconnect("WebSocket", connectWebsocket, MAX_RECONNECT_ATTEMPTS);
           return;
         }
-        connectSse();
+        // Auto mode: retry WS a few times then fall back to SSE
+        scheduleReconnect("WebSocket", connectWebsocket, MAX_RECONNECT_ATTEMPTS, () => {
+          connectSse();
+        });
       };
     };
 
+    // Initial fetch — only needed as bootstrap (WebSocket onopen also refreshes)
     void fetchState().catch(() => undefined);
     connectWebsocket();
 

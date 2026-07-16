@@ -12,4 +12,4 @@ router = APIRouter(prefix="/cost", tags=["Cost"])
 async def cost_status(
     current_user: dict[str, object] = Depends(get_current_user),
 ) -> dict[str, object]:
-    return cost_governor.get_status(str(current_user["user_id"]))
+    return await cost_governor.get_status(str(current_user["user_id"]))

@@ -8,12 +8,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import SessionLocal
+from app.core.dead_letter import push as dlq_push
 from app.core.websocket_manager import ws_manager
 from app.models.workflow import WorkflowRun
 from app.workflows.graph import workflow_graph
 from app.workflows.state import WorkflowStatus
 
 logger = logging.getLogger(__name__)
+
+# Concurrency gate: limit simultaneous workflow executions
+# Default: 10 concurrent workflows, overridable per tier
+_workflow_semaphore = asyncio.Semaphore(10)
 
 # Exceptions that should trigger a retry (transient errors)
 RETRYABLE_EXCEPTIONS = (
@@ -62,6 +67,11 @@ async def broadcast_workflow_snapshot(
 
 
 async def execute_workflow(session: AsyncSession, task_id: str) -> WorkflowRun:
+    async with _workflow_semaphore:
+        return await _execute_workflow_inner(session, task_id)
+
+
+async def _execute_workflow_inner(session: AsyncSession, task_id: str) -> WorkflowRun:
     result = await session.execute(select(WorkflowRun).where(WorkflowRun.id == task_id))
     run = result.scalar_one()
 
@@ -99,14 +109,15 @@ async def execute_workflow(session: AsyncSession, task_id: str) -> WorkflowRun:
             return run
 
         except FATAL_EXCEPTIONS:
-            # Permanent errors — do not retry
+            # Permanent errors — do not retry, push to DLQ
             logger.exception("Fatal workflow error for %s", task_id)
             run.current_status = WorkflowStatus.FAILED.value
             run.current_step = "workflow_error"
-            run.retry_count += 1  # mark the attempt
+            run.retry_count += 1
             run.updated_at = datetime.now(timezone.utc)
             await session.commit()
             await session.refresh(run)
+            dlq_push(run)
             await broadcast_workflow_snapshot(run, "error")
             return run
 
@@ -128,6 +139,7 @@ async def execute_workflow(session: AsyncSession, task_id: str) -> WorkflowRun:
                 run.updated_at = datetime.now(timezone.utc)
                 await session.commit()
                 await session.refresh(run)
+                dlq_push(run)
                 await broadcast_workflow_snapshot(run, "error")
                 return run
 

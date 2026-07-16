@@ -50,7 +50,7 @@ class ModelRouter:
             6,
         )
 
-    def select_model(
+    async def select_model(
         self,
         user_id: str,
         task_complexity: str = "medium",
@@ -68,7 +68,7 @@ class ModelRouter:
         ]
         for model_name in ordered_candidates:
             estimated_cost = self.estimate_cost(model_name, estimated_tokens)
-            allowed, details = cost_governor.check_budget(user_id, estimated_tokens, estimated_cost)
+            allowed, details = await cost_governor.check_budget(user_id, estimated_tokens, estimated_cost)
             if allowed:
                 return {
                     "model": model_name,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
@@ -46,7 +48,7 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str) -> None:
     try:
         await websocket.send_json(await build_state_payload(task_id))
         while True:
-            data = await websocket.receive_json()
+            data = await asyncio.wait_for(websocket.receive_json(), timeout=30.0)
             message_type = data.get("type")
             if message_type == "ping":
                 await websocket.send_json({"type": "pong", "taskId": task_id})
