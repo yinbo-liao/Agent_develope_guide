@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aiwf-analysis-templates
+data:
+  success-rate: "sum(rate(http_requests_total{status=~\"2..\"}[5m]))"
+  error-rate: "sum(rate(http_requests_total{status=~\"5..\"}[5m]))"

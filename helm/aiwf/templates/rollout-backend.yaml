@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aiwf-backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: aiwf-backend
+  template:
+    metadata:
+      labels:
+        app: aiwf-backend
+    spec:
+      containers:
+        - name: backend
+          image: aiwf/backend:latest
+          ports:
+            - containerPort: 8000

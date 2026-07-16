@@ -1,0 +1,32 @@
+{
+  "dashboard": {
+    "id": null,
+    "title": "AI Workflow Platform",
+    "schemaVersion": 36,
+    "refresh": "15s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Workflow Requests",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "sum(rate(http_requests_total[5m]))",
+            "legendFormat": "requests/sec"
+          }
+        ]
+      },
+      {
+        "id": 2,
+        "title": "LLM Cost",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "llm_cost_usd_total",
+            "legendFormat": "usd"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,21 @@
+backend:
+  replicaCount: 2
+  image:
+    repository: aiwf/backend
+    tag: latest
+  service:
+    port: 8000
+
+frontend:
+  replicaCount: 2
+  image:
+    repository: aiwf/frontend
+    tag: latest
+  service:
+    port: 8080
+
+monitoring:
+  enabled: true
+
+networkPolicies:
+  enabled: true

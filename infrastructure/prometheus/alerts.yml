@@ -1,0 +1,20 @@
+groups:
+  - name: aiwf_alerts
+    interval: 30s
+    rules:
+      - alert: HighWorkflowErrorRate
+        expr: increase(http_requests_total{status=~"5.."}[5m]) > 5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Elevated backend 5xx rate"
+          description: "The backend returned more than five 5xx responses in five minutes."
+
+      - alert: HighLLMCost
+        expr: llm_cost_usd_total > 25
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "LLM cost is trending above the local warning budget"

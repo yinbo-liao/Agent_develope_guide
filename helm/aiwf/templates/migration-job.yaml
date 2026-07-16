@@ -1,0 +1,12 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: aiwf-db-migration
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: migration
+          image: aiwf/backend:latest
+          command: ["python", "-c", "print('Apply migrations in CI/CD before release')"]
