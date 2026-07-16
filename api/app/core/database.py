@@ -11,13 +11,15 @@ from app.models import Base
 
 logger = logging.getLogger(__name__)
 
-engine: AsyncEngine = create_async_engine(
-    settings.DATABASE_URL,
-    echo=settings.DEBUG,
-    pool_pre_ping=True,
-    pool_size=10,
-    max_overflow=20,
-)
+_engine_kwargs: dict[str, object] = {
+    "echo": settings.DEBUG,
+    "pool_pre_ping": True,
+}
+# pool_size/max_overflow are PostgreSQL-specific; skip for SQLite (testing)
+if "sqlite" not in settings.DATABASE_URL:
+    _engine_kwargs.update({"pool_size": 10, "max_overflow": 20})
+
+engine: AsyncEngine = create_async_engine(settings.DATABASE_URL, **_engine_kwargs)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 

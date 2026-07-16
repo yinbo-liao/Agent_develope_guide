@@ -4,7 +4,7 @@ import logging
 import logging.config
 from typing import Any
 
-from pythonjsonlogger.json import JsonFormatter
+from pythonjsonlogger.jsonlogger import JsonFormatter
 
 from app.core.config import settings
 

@@ -19,7 +19,7 @@ async def check_redis_health() -> bool:
     except Exception:
         return False
     finally:
-        await client.close()
+        await client.aclose()
 
 
 @router.get("", status_code=status.HTTP_200_OK)

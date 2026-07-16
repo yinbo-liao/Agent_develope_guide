@@ -25,7 +25,8 @@ class LLMClient:
             f"{supporting_lines if supporting_lines else '- No additional context retrieved.'}\n\n"
             f"Execution profile: model={model}, max_tokens={max_tokens}, temperature={temperature}."
         )
-        tokens = min(max_tokens, max(1, len(content.split())) * 8)
+        # ~1.3 tokens per word for English text (industry standard)
+        tokens = min(max_tokens, max(1, int(len(content.split()) * 1.3)))
         estimated_cost = model_router.estimate_cost(model, tokens)
         return {
             "content": content,
