@@ -10,6 +10,7 @@ from app.models.workflow import WorkflowRun
 from app.services.cost_governor import cost_governor
 from app.services.llm_client import LLMClient
 from app.services.model_router import model_router
+from app.services.semantic_cache import check_cache, record_hit, record_miss, store_cache
 from app.services.vector_store import retrieve_context
 from app.workflows.state import RiskLevel, WorkflowStatus
 
@@ -111,6 +112,30 @@ async def auto_generate_response(run: WorkflowRun) -> dict[str, Any]:
         }
 
     model_name = str(model_choice["model"])
+
+    # Check semantic cache before generating
+    cached_response = await check_cache(run.input_query, model_name)
+    if cached_response is not None:
+        record_hit()
+        await cost_governor.record_usage(
+            user_id=run.user_id,
+            task_id=run.id,
+            tokens=cached_response.get("tokens_used", 0),
+            cost_usd=0.0,
+            model=model_name,
+        )
+        return {
+            "current_step": "auto_generate_response",
+            "current_status": WorkflowStatus.COMPLETED.value,
+            "final_response": cached_response.get("content", ""),
+            "agent_finding": f"Cached response served (model={model_name}).",
+            "total_tokens_used": run.total_tokens_used + cached_response.get("tokens_used", 0),
+            "cost_usd": round(run.cost_usd, 6),
+            "completed_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
+        }
+    record_miss()
+
     breaker = breaker_registry.get_llm_breaker(model_name)
     async with breaker:
         response = await LLMClient.generate(
@@ -129,6 +154,10 @@ async def auto_generate_response(run: WorkflowRun) -> dict[str, Any]:
         model=response["model"],
     )
     track_llm_cost(str(response["model"]), float(response["cost_usd"]))
+
+    # Store in semantic cache for future reuse
+    await store_cache(run.input_query, model_name, response)
+
     return {
         "current_step": "auto_generate_response",
         "current_status": WorkflowStatus.COMPLETED.value,
