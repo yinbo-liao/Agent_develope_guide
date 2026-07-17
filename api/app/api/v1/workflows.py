@@ -63,18 +63,39 @@ async def create_workflow(
     return to_summary(workflow)
 
 
-@router.get("", response_model=list[WorkflowSummary])
+@router.get("", response_model=dict[str, object])
 async def list_workflows(
+    offset: int = 0,
+    limit: int = 20,
     session: AsyncSession = Depends(get_db_session),
     current_user: dict[str, object] = Depends(get_current_user),
-) -> list[WorkflowSummary]:
-    stmt = select(WorkflowRun).where(
-        WorkflowRun.user_id == str(current_user["user_id"])
-    ).order_by(WorkflowRun.created_at.desc())
+) -> dict[str, object]:
+    limit = min(limit, 100)  # cap at 100
 
+    # Count total
+    count_stmt = select(WorkflowRun).where(
+        WorkflowRun.user_id == str(current_user["user_id"])
+    )
+    count_result = await session.execute(count_stmt)
+    total = len(count_result.scalars().all())
+
+    # Fetch page
+    stmt = (
+        select(WorkflowRun)
+        .where(WorkflowRun.user_id == str(current_user["user_id"]))
+        .order_by(WorkflowRun.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+    )
     result = await session.execute(stmt)
     runs = result.scalars().all()
-    return [to_summary(run) for run in runs]
+
+    return {
+        "items": [to_summary(run) for run in runs],
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+    }
 
 
 @router.get("/{task_id}", response_model=WorkflowDetail)

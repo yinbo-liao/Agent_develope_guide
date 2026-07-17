@@ -63,7 +63,10 @@ async def test_list_workflows(
     response = await async_client.get("/api/v1/workflows", headers=auth_headers)
     assert response.status_code == 200
     data = response.json()
-    assert isinstance(data, list)
+    assert isinstance(data, dict)
+    assert "items" in data
+    assert "total" in data
+    assert isinstance(data["items"], list)
 
 
 @pytest.mark.anyio
