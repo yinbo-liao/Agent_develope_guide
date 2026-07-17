@@ -5,11 +5,14 @@ from app.workflows.nodes import (
     assess_risk,
     auto_generate_response,
     complex_analysis,
+    evaluate_output_quality,
     human_review_node,
     retrieve_context_node,
     validate_input,
 )
 from app.workflows.state import RiskLevel, WorkflowStatus
+
+MAX_REACT_ITERATIONS = 3
 
 
 class WorkflowGraph:
@@ -38,6 +41,25 @@ class WorkflowGraph:
             steps.append(await auto_generate_response(run))
         elif run.risk_level in {RiskLevel.MEDIUM.value, RiskLevel.HIGH.value}:
             steps.append(await complex_analysis(run))
+            # ReAct loop: evaluate quality, refine if needed
+            for iteration in range(MAX_REACT_ITERATIONS):
+                # Update run state from last step
+                last = steps[-1]
+                run.final_response = str(last.get("final_response", ""))
+                run.current_status = str(last.get("current_status", ""))
+
+                if run.current_status == WorkflowStatus.FAILED.value:
+                    break
+
+                quality = await evaluate_output_quality(run)
+                steps.append(quality)
+
+                if not quality.get("needs_refinement"):
+                    break
+
+                # Refine: re-run analysis with quality feedback
+                refinement_step = await complex_analysis(run)
+                steps.append(refinement_step)
         else:
             steps.append(await human_review_node(run))
 

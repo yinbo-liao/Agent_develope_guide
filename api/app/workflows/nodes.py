@@ -9,10 +9,14 @@ from app.core.metrics import track_llm_cost
 from app.models.workflow import WorkflowRun
 from app.services.cost_governor import cost_governor
 from app.services.llm_client import LLMClient
-from app.services.model_router import model_router
+from app.services.model_router import model_router, score_confidence
 from app.services.semantic_cache import check_cache, record_hit, record_miss, store_cache
 from app.services.vector_store import retrieve_context
 from app.workflows.state import RiskLevel, WorkflowStatus
+
+# Risk pattern bias factors — adjusted by feedback from human reviewers
+# Higher bias = more sensitive (false positives), lower = less sensitive (false negatives)
+_pattern_biases: dict[str, float] = {}
 
 
 async def validate_input(run: WorkflowRun) -> dict[str, Any]:
@@ -59,12 +63,14 @@ async def assess_risk(run: WorkflowRun) -> dict[str, Any]:
 
     for pattern, reason in critical_patterns.items():
         if re.search(pattern, query):
-            score += 50
+            bias = _pattern_biases.get(pattern, 1.0)
+            score += int(50 * bias)
             factors.append(f"CRITICAL: {reason}")
 
     for pattern, reason in high_patterns.items():
         if re.search(pattern, query):
-            score += 20
+            bias = _pattern_biases.get(pattern, 1.0)
+            score += int(20 * bias)
             factors.append(f"HIGH: {reason}")
 
     if run.retrieval_results:
@@ -88,6 +94,77 @@ async def assess_risk(run: WorkflowRun) -> dict[str, Any]:
         else WorkflowStatus.EXECUTING.value,
         "risk_level": level.value,
         "risk_factors": factors,
+        "updated_at": datetime.now(timezone.utc),
+    }
+
+
+def adjust_risk_bias(pattern: str, outcome: str) -> None:
+    """Adjust risk pattern bias based on human review outcome.
+
+    - If CRITICAL workflow was APPROVED: reduce bias (it was a false positive)
+    - If LOW/ MEDIUM workflow FAILED: increase bias (it was a false negative)
+    """
+    current = _pattern_biases.get(pattern, 1.0)
+    if outcome == "approved":
+        _pattern_biases[pattern] = max(0.3, current - 0.1)
+    elif outcome == "rejected":
+        _pattern_biases[pattern] = min(2.0, current + 0.1)
+
+
+def get_risk_biases() -> dict[str, float]:
+    """Return current risk bias factors for observability."""
+    return dict(_pattern_biases)
+
+
+async def evaluate_output_quality(run: WorkflowRun) -> dict[str, Any]:
+    """Evaluate the quality of the current response and decide if refinement is needed.
+
+    Uses heuristic scoring to determine if the response is adequate.
+    Returns a dict with 'quality_score' (0.0-1.0) and 'needs_refinement' (bool).
+    """
+    content = run.final_response or ""
+
+    if not content or len(content.strip()) < 20:
+        return {
+            "current_step": "evaluate_quality",
+            "quality_score": 0.0,
+            "needs_refinement": True,
+            "updated_at": datetime.now(timezone.utc),
+        }
+
+    score = 1.0
+
+    # Completeness: does response length match query complexity?
+    query_words = len(run.input_query.split())
+    response_words = len(content.split())
+    if response_words < query_words * 0.5:
+        score -= 0.3
+
+    # Coherence: check for contradiction markers
+    lowered = content.lower()
+    contradiction_markers = ["however", "on the other hand", "but actually", "contrary"]
+    if sum(1 for m in contradiction_markers if m in lowered) > 2:
+        score -= 0.15
+
+    # Grounding: does response reference the context?
+    if run.retrieval_results:
+        has_reference = any(
+            str(item.get("snippet", ""))[:30].lower() in lowered
+            for item in run.retrieval_results
+        )
+        if not has_reference:
+            score -= 0.2
+
+    # Actionability: does response contain concrete steps?
+    actionable_markers = ["step", "recommend", "should", "you can", "try to"]
+    if not any(m in lowered for m in actionable_markers):
+        score -= 0.1
+
+    needs_refinement = score < 0.5
+    return {
+        "current_step": "evaluate_quality",
+        "quality_score": max(0.0, min(1.0, score)),
+        "needs_refinement": needs_refinement,
         "updated_at": datetime.now(timezone.utc),
     }
 
@@ -172,50 +249,92 @@ async def auto_generate_response(run: WorkflowRun) -> dict[str, Any]:
 
 async def complex_analysis(run: WorkflowRun) -> dict[str, Any]:
     complexity = "complex" if run.risk_level == RiskLevel.HIGH.value else "medium"
-    model_choice = await model_router.select_model(
+    cascade = await model_router.select_cascade(
         user_id=run.user_id,
         task_complexity=complexity,
         estimated_tokens=max(512, run.token_budget - run.total_tokens_used),
     )
-    allowed, budget_status = await cost_governor.check_budget(
-        run.user_id,
-        estimated_tokens=max(512, run.token_budget - run.total_tokens_used),
-        estimated_cost=float(model_choice["estimated_cost"]),
-    )
-    if not allowed:
+
+    cascade_models = cascade.get("models", [cascade["model"]])
+    last_response: dict[str, Any] | None = None
+
+    for attempt, model_name in enumerate(cascade_models[:3]):  # max 3 tiers
+        estimated_cost = model_router.estimate_cost(
+            model_name, max(512, run.token_budget - run.total_tokens_used)
+        )
+        allowed, budget_status = await cost_governor.check_budget(
+            run.user_id,
+            estimated_tokens=max(512, run.token_budget - run.total_tokens_used),
+            estimated_cost=estimated_cost,
+        )
+        if not allowed:
+            if last_response is not None:
+                break  # Use last successful response
+            return {
+                "current_step": "budget_guard",
+                "current_status": WorkflowStatus.FAILED.value,
+                "error_info": str(budget_status.get("reason", "Budget check failed")),
+                "updated_at": datetime.now(timezone.utc),
+            }
+
+        breaker = breaker_registry.get_llm_breaker(model_name)
+        try:
+            async with breaker:
+                response = await LLMClient.generate(
+                    prompt=f"Provide a more careful operational analysis for: {run.input_query}",
+                    context=run.retrieval_results or [],
+                    max_tokens=max(512, run.token_budget - run.total_tokens_used),
+                    temperature=0.1,
+                    model=model_name,
+                )
+        except RuntimeError:  # circuit breaker open
+            continue
+
+        confidence = score_confidence(response["content"])
+
+        await cost_governor.record_usage(
+            user_id=run.user_id,
+            task_id=run.id,
+            tokens=response["tokens_used"],
+            cost_usd=response["cost_usd"],
+            model=response["model"],
+        )
+        track_llm_cost(str(response["model"]), float(response["cost_usd"]))
+        last_response = response
+
+        # If confidence is high enough, stop escalating
+        if confidence >= 0.7 or attempt == len(cascade_models) - 1:
+            return {
+                "current_step": "complex_analysis",
+                "current_status": WorkflowStatus.COMPLETED.value,
+                "final_response": response["content"],
+                "agent_finding": (
+                    f"Cascade analysis tier {attempt + 1} "
+                    f"with {response['model']} (confidence={confidence:.2f})."
+                ),
+                "total_tokens_used": run.total_tokens_used + response["tokens_used"],
+                "cost_usd": round(run.cost_usd + response["cost_usd"], 6),
+                "completed_at": datetime.now(timezone.utc),
+                "updated_at": datetime.now(timezone.utc),
+            }
+
+    # All cascade tiers exhausted
+    if last_response is not None:
         return {
-            "current_step": "budget_guard",
-            "current_status": WorkflowStatus.FAILED.value,
-            "error_info": str(budget_status.get("reason", "Budget check failed")),
+            "current_step": "complex_analysis",
+            "current_status": WorkflowStatus.COMPLETED.value,
+            "final_response": last_response["content"],
+            "agent_finding": "Cascade analysis completed with fallback model.",
+            "total_tokens_used": run.total_tokens_used + last_response["tokens_used"],
+            "cost_usd": round(run.cost_usd + last_response["cost_usd"], 6),
+            "completed_at": datetime.now(timezone.utc),
             "updated_at": datetime.now(timezone.utc),
         }
 
-    model_name = str(model_choice["model"])
-    breaker = breaker_registry.get_llm_breaker(model_name)
-    async with breaker:
-        response = await LLMClient.generate(
-            prompt=f"Provide a more careful operational analysis for: {run.input_query}",
-            context=run.retrieval_results or [],
-            max_tokens=max(512, run.token_budget - run.total_tokens_used),
-            temperature=0.1,
-            model=model_name,
-        )
-    await cost_governor.record_usage(
-        user_id=run.user_id,
-        task_id=run.id,
-        tokens=response["tokens_used"],
-        cost_usd=response["cost_usd"],
-        model=response["model"],
-    )
-    track_llm_cost(str(response["model"]), float(response["cost_usd"]))
     return {
         "current_step": "complex_analysis",
-        "current_status": WorkflowStatus.COMPLETED.value,
-        "final_response": response["content"],
-        "agent_finding": f"Escalated analysis path completed with {response['model']}.",
-        "total_tokens_used": run.total_tokens_used + response["tokens_used"],
-        "cost_usd": round(run.cost_usd + response["cost_usd"], 6),
-        "completed_at": datetime.now(timezone.utc),
+        "current_status": WorkflowStatus.FAILED.value,
+        "error_info": "All cascade tiers unavailable.",
         "updated_at": datetime.now(timezone.utc),
     }
 

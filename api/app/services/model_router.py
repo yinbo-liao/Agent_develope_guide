@@ -85,4 +85,78 @@ class ModelRouter:
         }
 
 
+    async def select_cascade(
+        self,
+        user_id: str,
+        task_complexity: str = "medium",
+        estimated_tokens: int = 1000,
+    ) -> dict[str, Any]:
+        """Cascade mode: return ordered model list for tiered escalation.
+
+        Returns a dict with 'models' list ordered cheapest→most-capable,
+        plus 'cascade_mode': True to signal the caller.
+        """
+        result = await self.select_model(
+            user_id=user_id,
+            task_complexity=task_complexity,
+            estimated_tokens=estimated_tokens,
+        )
+        # Build cascade from cheapest eligible to the currently selected
+        budget = cost_governor.get_budget_config(user_id)
+        candidates = list(budget.allowed_models)
+        if len(candidates) <= 1:
+            result["cascade_mode"] = False
+            result["models"] = [result["model"]]
+            return result
+
+        # Order by cost (cheapest first)
+        cascade_order = sorted(
+            candidates, key=lambda m: self.estimate_cost(m, estimated_tokens)
+        )
+        return {
+            "cascade_mode": True,
+            "models": cascade_order,
+            "primary": result["model"],
+            "estimated_tokens": estimated_tokens,
+        }
+
+
+def score_confidence(content: str) -> float:
+    """Heuristic confidence scoring for LLM responses.
+
+    Returns 0.0–1.0 where higher = more confident.
+    Low confidence indicators: short responses, uncertainty phrases,
+    error messages, lack of structure.
+    """
+    if not content or len(content.strip()) < 20:
+        return 0.0
+
+    score = 1.0
+
+    # Penalize short responses
+    word_count = len(content.split())
+    if word_count < 30:
+        score -= 0.3
+    elif word_count < 50:
+        score -= 0.1
+
+    # Penalize uncertainty markers
+    uncertainty_phrases = [
+        "i don't know", "i'm not sure", "i cannot", "unable to",
+        "i apologize", "as an ai", "i don't have", "no information",
+        "could not find", "not available", "insufficient data",
+    ]
+    lowered = content.lower()
+    for phrase in uncertainty_phrases:
+        if phrase in lowered:
+            score -= 0.15
+
+    # Reward structure (presence of summary/conclusion sections)
+    if any(marker in lowered for marker in ("summary", "conclusion", "in summary")):
+        score += 0.1
+
+    # Cap at 0.0–1.0
+    return max(0.0, min(1.0, score))
+
+
 model_router = ModelRouter()
