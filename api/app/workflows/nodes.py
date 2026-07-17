@@ -111,6 +111,68 @@ def adjust_risk_bias(pattern: str, outcome: str) -> None:
         _pattern_biases[pattern] = min(2.0, current + 0.1)
 
 
+async def meta_review_node(run: WorkflowRun) -> dict[str, Any]:
+    """Self-review the final response using a different model for adversarial critique.
+
+    Returns a dict with 'review_passed' (bool) and 'review_feedback' (str).
+    If review fails, triggers re-generation via the 'needs_regeneration' flag.
+    """
+    content = run.final_response or ""
+    if not content:
+        return {
+            "current_step": "meta_review",
+            "review_passed": False,
+            "review_feedback": "Empty response — regeneration required.",
+            "needs_regeneration": True,
+            "updated_at": datetime.now(timezone.utc),
+        }
+
+    # Use a different model/prompt for the review (adversarial check)
+    reviewer_model = "claude-haiku-3-5"  # cheap model for review
+    review_prompt = (
+        f"Review the following response for correctness, completeness, and safety.\n\n"
+        f"Original query: {run.input_query}\n\n"
+        f"Response to review:\n{content[:1000]}\n\n"
+        f"Check for:\n"
+        f"1. Hallucinations or factual errors\n"
+        f"2. Missing critical information\n"
+        f"3. Unsafe or harmful recommendations\n"
+        f"4. Contradictions or logical gaps\n\n"
+        f"Is this response acceptable? Answer YES or NO and explain briefly."
+    )
+
+    breaker = breaker_registry.get_llm_breaker(reviewer_model)
+    try:
+        async with breaker:
+            review_response = await LLMClient.generate(
+                prompt=review_prompt,
+                context=run.retrieval_results or [],
+                max_tokens=256,
+                temperature=0.0,
+                model=reviewer_model,
+            )
+    except RuntimeError:
+        # Circuit breaker open — skip review
+        return {
+            "current_step": "meta_review",
+            "review_passed": True,
+            "review_feedback": "Meta-review skipped (circuit breaker open).",
+            "needs_regeneration": False,
+            "updated_at": datetime.now(timezone.utc),
+        }
+
+    review_text = review_response.get("content", "").lower()
+    passed = "yes" in review_text[:10]  # first word should indicate judgment
+
+    return {
+        "current_step": "meta_review",
+        "review_passed": passed,
+        "review_feedback": review_response.get("content", ""),
+        "needs_regeneration": not passed,
+        "updated_at": datetime.now(timezone.utc),
+    }
+
+
 def get_risk_biases() -> dict[str, float]:
     """Return current risk bias factors for observability."""
     return dict(_pattern_biases)

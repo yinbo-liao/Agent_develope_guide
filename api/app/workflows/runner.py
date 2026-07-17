@@ -25,7 +25,7 @@ RETRYABLE_EXCEPTIONS = (
     TimeoutError,
     ConnectionError,
     asyncio.TimeoutError,
-    OSError,  # network-level failures
+    OSError,
 )
 
 # Exceptions that should NOT be retried (permanent errors)
@@ -35,6 +35,20 @@ FATAL_EXCEPTIONS = (
     KeyError,
     AttributeError,
 )
+
+
+def _remediation_for(exc: Exception) -> str | None:
+    """Return a remediation strategy string for known error types, or None."""
+    msg = str(exc).lower()
+    if "timeout" in msg or isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+        return "timeout"
+    if "circuit" in msg and "open" in msg:
+        return "circuit_open"
+    if "budget" in msg or "limit exceeded" in msg or "cost limit" in msg:
+        return "budget"
+    if "connection" in msg or "refused" in msg:
+        return "connection"
+    return None
 
 
 def apply_updates(run: WorkflowRun, updates: dict[str, object]) -> None:
@@ -108,11 +122,11 @@ async def _execute_workflow_inner(session: AsyncSession, task_id: str) -> Workfl
             await broadcast_workflow_snapshot(run, "workflow_complete")
             return run
 
-        except FATAL_EXCEPTIONS:
-            # Permanent errors — do not retry, push to DLQ
+        except FATAL_EXCEPTIONS as exc:
             logger.exception("Fatal workflow error for %s", task_id)
             run.current_status = WorkflowStatus.FAILED.value
             run.current_step = "workflow_error"
+            run.error_info = str(exc)
             run.retry_count += 1
             run.updated_at = datetime.now(timezone.utc)
             await session.commit()
@@ -122,20 +136,22 @@ async def _execute_workflow_inner(session: AsyncSession, task_id: str) -> Workfl
             return run
 
         except Exception as exc:
+            remediation = _remediation_for(exc)
             run.retry_count += 1
             logger.warning(
-                "Workflow %s attempt %d/%d failed: %s",
-                task_id,
-                run.retry_count,
-                run.max_retries + 1,
-                exc,
+                "Workflow %s attempt %d/%d failed [%s]: %s",
+                task_id, run.retry_count, run.max_retries + 1,
+                remediation or "unknown", exc,
             )
 
-            if run.retry_count > run.max_retries:
-                logger.error("Workflow %s exhausted all retries", task_id)
+            # Auto-remediation adjustments
+            if remediation == "circuit_open":
+                # Queue and retry when circuit closes
+                run.error_info = "Circuit breaker open — queued for retry when circuit closes."
+            elif remediation == "budget":
+                run.error_info = "Budget exceeded — workflow deferred."
+                # No retry on budget — push to DLQ immediately
                 run.current_status = WorkflowStatus.FAILED.value
-                run.current_step = "workflow_error"
-                run.error_info = f"Exhausted {run.max_retries} retries. Last error: {exc}"
                 run.updated_at = datetime.now(timezone.utc)
                 await session.commit()
                 await session.refresh(run)
@@ -143,13 +159,30 @@ async def _execute_workflow_inner(session: AsyncSession, task_id: str) -> Workfl
                 await broadcast_workflow_snapshot(run, "error")
                 return run
 
-            # Exponential backoff with jitter: delay = min(2^retry, 60) seconds
+            if run.retry_count > run.max_retries:
+                logger.error("Workflow %s exhausted all retries", task_id)
+                run.current_status = WorkflowStatus.FAILED.value
+                run.current_step = "workflow_error"
+                run.error_info = (
+                    f"Exhausted {run.max_retries} retries. "
+                    f"Last error [{remediation}]: {exc}"
+                )
+                run.updated_at = datetime.now(timezone.utc)
+                await session.commit()
+                await session.refresh(run)
+                dlq_push(run)
+                await broadcast_workflow_snapshot(run, "error")
+                return run
+
+            # Exponential backoff with remediation-specific adjustments
             delay = min(2 ** run.retry_count, 60)
-            logger.info("Retrying workflow %s in %ds...", task_id, delay)
-            run.error_info = f"Retry {run.retry_count}/{run.max_retries}: {exc}"
+            if remediation == "timeout":
+                delay = min(2 ** run.retry_count, 120)  # longer wait for timeouts
+            logger.info("Retrying workflow %s in %ds (remediation: %s)...", task_id, delay, remediation)
+            run.error_info = f"Retry {run.retry_count}/{run.max_retries} [{remediation}]: {exc}"
             run.updated_at = datetime.now(timezone.utc)
             await session.commit()
-            await broadcast_workflow_snapshot(run, "step", {"stepName": "retry", "stepStatus": "retrying"})
+            await broadcast_workflow_snapshot(run, "step", {"stepName": "retry", "stepStatus": f"retrying_{remediation}"})
             await asyncio.sleep(delay)
 
 

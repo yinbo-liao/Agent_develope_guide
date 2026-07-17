@@ -7,6 +7,7 @@ from app.workflows.nodes import (
     complex_analysis,
     evaluate_output_quality,
     human_review_node,
+    meta_review_node,
     retrieve_context_node,
     validate_input,
 )
@@ -43,7 +44,6 @@ class WorkflowGraph:
             steps.append(await complex_analysis(run))
             # ReAct loop: evaluate quality, refine if needed
             for iteration in range(MAX_REACT_ITERATIONS):
-                # Update run state from last step
                 last = steps[-1]
                 run.final_response = str(last.get("final_response", ""))
                 run.current_status = str(last.get("current_status", ""))
@@ -60,6 +60,17 @@ class WorkflowGraph:
                 # Refine: re-run analysis with quality feedback
                 refinement_step = await complex_analysis(run)
                 steps.append(refinement_step)
+
+            # Meta-cognitive review: adversarial check on final output
+            last = steps[-1]
+            run.final_response = str(last.get("final_response", ""))
+            run.current_status = str(last.get("current_status", ""))
+            if run.current_status != WorkflowStatus.FAILED.value:
+                review = await meta_review_node(run)
+                steps.append(review)
+                if review.get("needs_regeneration"):
+                    regen = await complex_analysis(run)
+                    steps.append(regen)
         else:
             steps.append(await human_review_node(run))
 

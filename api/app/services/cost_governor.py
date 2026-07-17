@@ -269,7 +269,7 @@ class CostGovernor:
 
     async def close(self) -> None:
         if self._redis:
-            await self._redis.close()
+            await self._redis.aclose()
             self._redis_available = False
 
 

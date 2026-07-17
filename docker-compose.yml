@@ -2,6 +2,7 @@ services:
   postgres:
     image: postgres:17-alpine
     container_name: aiwf-db
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ${DB_USER:-aiwf}
       POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme_in_production}
@@ -19,6 +20,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: aiwf-redis
+    restart: unless-stopped
     command: >
       redis-server
       --appendonly yes
@@ -36,6 +38,7 @@ services:
   opa:
     image: openpolicyagent/opa:0.68.0
     container_name: aiwf-opa
+    restart: unless-stopped
     command:
       [
         "run",
@@ -54,6 +57,7 @@ services:
       context: ./api
       dockerfile: ../infrastructure/docker/api/Dockerfile.dev
     container_name: aiwf-backend
+    restart: unless-stopped
     environment:
       ENVIRONMENT: development
       DEBUG: "true"
@@ -73,6 +77,12 @@ services:
       - "8000:8000"
     volumes:
       - ./api:/app
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
   frontend:
@@ -80,6 +90,7 @@ services:
       context: ./frontend
       dockerfile: ../infrastructure/docker/frontend/Dockerfile.dev
     container_name: aiwf-frontend
+    restart: unless-stopped
     environment:
       VITE_API_URL: http://localhost:8000
     depends_on:
