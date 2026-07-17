@@ -69,9 +69,9 @@ allow if {
     agent.network
 }
 
-violation contains {"msg": msg} if {
-    agent := agents[input.agent]
+violation[{"msg": msg}] {
     input.action == "write"
+    agent := agents[input.agent]
     not is_within_path(input.path, agent.write)
     msg := sprintf("Agent %s cannot write to %s", [input.agent, input.path])
 }
