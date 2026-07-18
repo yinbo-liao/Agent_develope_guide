@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
 from app.services.model_router import ModelRouter, score_confidence
@@ -68,23 +70,25 @@ class TestSelectCascade:
         router = ModelRouter()
         from app.services.cost_governor import BudgetTier, cost_governor
 
-        cost_governor._user_tiers["test-user"] = BudgetTier.STARTER  # haiku + sonnet
-        result = await router.select_cascade(
-            user_id="test-user", task_complexity="fast", estimated_tokens=1000
-        )
+        cost_governor._user_tiers["test-user"] = BudgetTier.STARTER
+        with patch.object(cost_governor, "_ensure_redis", return_value=False):
+            result = await router.select_cascade(
+                user_id="test-user", task_complexity="fast", estimated_tokens=1000
+            )
         assert result["cascade_mode"] is True
         assert len(result["models"]) >= 2
-        assert result["models"][0] == "claude-haiku-3-5"  # cheapest first
+        assert result["models"][0] == "claude-haiku-3-5"
 
     @pytest.mark.anyio
     async def test_cascade_mode_disabled_for_single_model_tier(self) -> None:
         router = ModelRouter()
         from app.services.cost_governor import BudgetTier, cost_governor
 
-        cost_governor._user_tiers["free-user"] = BudgetTier.FREE  # only haiku
-        result = await router.select_cascade(
-            user_id="free-user", task_complexity="complex", estimated_tokens=5000
-        )
+        cost_governor._user_tiers["free-user"] = BudgetTier.FREE
+        with patch.object(cost_governor, "_ensure_redis", return_value=False):
+            result = await router.select_cascade(
+                user_id="free-user", task_complexity="complex", estimated_tokens=5000
+            )
         assert result["cascade_mode"] is False
         assert len(result["models"]) == 1
 
@@ -93,22 +97,24 @@ class TestSelectCascade:
         router = ModelRouter()
         from app.services.cost_governor import BudgetTier, cost_governor
 
-        cost_governor._user_tiers["pro-user"] = BudgetTier.PROFESSIONAL  # haiku, sonnet, opus
-        result = await router.select_cascade(
-            user_id="pro-user", task_complexity="medium", estimated_tokens=2000
-        )
+        cost_governor._user_tiers["pro-user"] = BudgetTier.PROFESSIONAL
+        with patch.object(cost_governor, "_ensure_redis", return_value=False):
+            result = await router.select_cascade(
+                user_id="pro-user", task_complexity="medium", estimated_tokens=2000
+            )
         models = result["models"]
         costs = [router.estimate_cost(m, 2000) for m in models]
-        assert costs == sorted(costs)  # ascending order
+        assert costs == sorted(costs)
 
     @pytest.mark.anyio
     async def test_cascade_for_enterprise_tier(self) -> None:
         router = ModelRouter()
         from app.services.cost_governor import BudgetTier, cost_governor
 
-        cost_governor._user_tiers["ent-user"] = BudgetTier.ENTERPRISE  # all 4 models
-        result = await router.select_cascade(
-            user_id="ent-user", task_complexity="complex", estimated_tokens=10000
-        )
+        cost_governor._user_tiers["ent-user"] = BudgetTier.ENTERPRISE
+        with patch.object(cost_governor, "_ensure_redis", return_value=False):
+            result = await router.select_cascade(
+                user_id="ent-user", task_complexity="complex", estimated_tokens=10000
+            )
         assert result["cascade_mode"] is True
         assert len(result["models"]) == 4

@@ -1,0 +1,33 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "command": "python .claude/hooks/security_firewall_v2.py"
+      },
+      {
+        "matcher": "Edit",
+        "command": "python .claude/hooks/security_firewall_v2.py"
+      },
+      {
+        "matcher": "Write",
+        "command": "python .claude/hooks/security_firewall_v2.py"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "command": "python .claude/hooks/audit_logger_v2.py"
+      }
+    ]
+  },
+  "mcpServers": {
+    "aiwf-platform": {
+      "command": "python",
+      "args": ["-m", "app.mcp.server"],
+      "env": {
+        "AIWF_API_URL": "http://localhost:8000"
+      }
+    }
+  }
+}

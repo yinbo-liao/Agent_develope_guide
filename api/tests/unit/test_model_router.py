@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 
 from app.services.model_router import MODEL_REGISTRY, ModelCapability, ModelRouter
 
 router = ModelRouter()
+
+
+def _mock_redis_off():
+    """Context manager that forces cost_governor to use in-memory fallback."""
+    from app.services.cost_governor import cost_governor
+    return patch.object(cost_governor, "_ensure_redis", return_value=False)
 
 
 def test_estimate_cost_for_known_model() -> None:
@@ -20,17 +28,19 @@ def test_estimate_cost_for_unknown_model() -> None:
 
 @pytest.mark.anyio
 async def test_select_model_returns_cheapest_for_fast_tasks() -> None:
-    result = await router.select_model(
-        user_id="starter-user", task_complexity="fast", estimated_tokens=1000
-    )
+    with _mock_redis_off():
+        result = await router.select_model(
+            user_id="starter-user", task_complexity="fast", estimated_tokens=1000
+        )
     assert result["model"] in ("claude-haiku-3-5", "claude-sonnet-4-6")
 
 
 @pytest.mark.anyio
 async def test_select_model_for_complex_tasks() -> None:
-    result = await router.select_model(
-        user_id="professional-user", task_complexity="complex", estimated_tokens=5000
-    )
+    with _mock_redis_off():
+        result = await router.select_model(
+            user_id="professional-user", task_complexity="complex", estimated_tokens=5000
+        )
     assert result["model"] in (
         "claude-opus-4-6",
         "claude-sonnet-4-6",
@@ -43,9 +53,10 @@ async def test_select_model_for_free_tier() -> None:
     from app.services.cost_governor import BudgetTier, cost_governor
 
     cost_governor._user_tiers["free-user"] = BudgetTier.FREE
-    result = await router.select_model(
-        user_id="free-user", task_complexity="complex", estimated_tokens=1000
-    )
+    with _mock_redis_off():
+        result = await router.select_model(
+            user_id="free-user", task_complexity="complex", estimated_tokens=1000
+        )
     assert result["model"] == "claude-haiku-3-5"
 
 

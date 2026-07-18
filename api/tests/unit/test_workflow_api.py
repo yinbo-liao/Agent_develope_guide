@@ -44,16 +44,16 @@ async def test_create_workflow_rejects_empty_query(
 
 
 @pytest.mark.anyio
-async def test_create_workflow_requires_auth(async_client: AsyncClient) -> None:
-    """Unauthenticated requests should receive 401."""
+async def test_create_workflow_accepts_unauthenticated(async_client: AsyncClient) -> None:
+    """In dev mode, unauthenticated requests should work (optional auth)."""
     response = await async_client.post(
         "/api/v1/workflows",
         json={
-            "user_id": "test-user",
+            "user_id": "anonymous-user",
             "input_query": "Some valid query here.",
         },
     )
-    assert response.status_code == 401
+    assert response.status_code == 202
 
 
 @pytest.mark.anyio

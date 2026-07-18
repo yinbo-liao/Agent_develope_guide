@@ -4,15 +4,19 @@ import pytest
 
 from app.services.cost_governor import BUDGET_CONFIGS, BudgetTier, CostGovernor
 
+# Use invalid Redis URL in tests to force in-memory fallback
+# (avoids async event loop issues with real Redis connections in test environment)
+TEST_REDIS_URL = "redis://invalid-test-host:99999/0"
+
 
 def test_get_budget_config_returns_default_tier() -> None:
-    governor = CostGovernor()
+    governor = CostGovernor(redis_url=TEST_REDIS_URL)
     config = governor.get_budget_config("unknown-user")
     assert config.tier == BudgetTier.STARTER
 
 
 def test_get_budget_config_for_known_tier() -> None:
-    governor = CostGovernor()
+    governor = CostGovernor(redis_url=TEST_REDIS_URL)
     governor._user_tiers["enterprise-user"] = BudgetTier.ENTERPRISE
     config = governor.get_budget_config("enterprise-user")
     assert config.tier == BudgetTier.ENTERPRISE
@@ -21,7 +25,7 @@ def test_get_budget_config_for_known_tier() -> None:
 
 @pytest.mark.anyio
 async def test_check_budget_allows_within_limits() -> None:
-    governor = CostGovernor()
+    governor = CostGovernor(redis_url=TEST_REDIS_URL)
     governor._user_tiers["test-user"] = BudgetTier.STARTER
     allowed, details = await governor.check_budget("test-user", estimated_tokens=100, estimated_cost=0.01)
     assert allowed is True
@@ -30,7 +34,7 @@ async def test_check_budget_allows_within_limits() -> None:
 
 @pytest.mark.anyio
 async def test_check_budget_rejects_over_token_limit() -> None:
-    governor = CostGovernor()
+    governor = CostGovernor(redis_url=TEST_REDIS_URL)
     governor._user_tiers["test-user"] = BudgetTier.FREE
     allowed, details = await governor.check_budget(
         "test-user", estimated_tokens=20_000, estimated_cost=0.0
@@ -41,7 +45,7 @@ async def test_check_budget_rejects_over_token_limit() -> None:
 
 @pytest.mark.anyio
 async def test_check_budget_rejects_over_cost_limit() -> None:
-    governor = CostGovernor()
+    governor = CostGovernor(redis_url=TEST_REDIS_URL)
     governor._user_tiers["test-user"] = BudgetTier.FREE
     allowed, details = await governor.check_budget(
         "test-user", estimated_tokens=0, estimated_cost=5.0
@@ -52,7 +56,7 @@ async def test_check_budget_rejects_over_cost_limit() -> None:
 
 @pytest.mark.anyio
 async def test_record_usage_updates_counters() -> None:
-    governor = CostGovernor()
+    governor = CostGovernor(redis_url=TEST_REDIS_URL)
     governor._user_tiers["test-user"] = BudgetTier.STARTER
     await governor.record_usage("test-user", "task-1", tokens=500, cost_usd=0.05, model="claude-haiku-3-5")
 
@@ -63,7 +67,7 @@ async def test_record_usage_updates_counters() -> None:
 
 @pytest.mark.anyio
 async def test_get_status_returns_summary() -> None:
-    governor = CostGovernor()
+    governor = CostGovernor(redis_url=TEST_REDIS_URL)
     governor._user_tiers["test-user"] = BudgetTier.PROFESSIONAL
     await governor.record_usage("test-user", "task-1", tokens=1000, cost_usd=0.10, model="claude-sonnet-4-6")
 
