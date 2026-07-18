@@ -250,6 +250,112 @@ The React dashboard at `http://localhost:5173` provides:
 
 ---
 
+## Claude Code Agent Plugin
+
+The platform integrates as a **Claude Code agent plugin** — invoke governed workflows, check cost status, and use MCP tools directly from Claude Code.
+
+### What the Plugin Provides
+
+| Integration | Location | What It Does |
+|---|---|---|
+| **Slash Commands** | `.claude/skills/` | `/workflow` and `/workflow-status` |
+| **MCP Server** | `api/app/mcp/server.py` | 4 MCP tools: `create_workflow`, `get_workflow_status`, `list_workflows`, `get_cost_status` |
+| **Security Hooks** | `.claude/hooks/` | Blocks dangerous commands, destructive SQL, hardcoded secrets |
+| **Audit Logging** | `.claude/hooks/` | JSONL audit trail with sensitive data redaction |
+| **Agent Roles** | `.claude/agents/` | 5 scoped agent definitions enforced by OPA |
+| **CLI** | `python -m app.cli` | Run workflows from command line without HTTP server |
+
+### Slash Commands
+
+#### `/workflow` — Submit a Governed Task
+
+```
+/workflow "analyze security impact of deployment PR #42"
+```
+
+What happens: query is risk-assessed → best model selected → results streamed back with step progress, cost, and model info. Critical queries pause for human review.
+
+#### `/workflow-status` — Check Status
+
+```
+/workflow-status                    # List 10 most recent workflows
+/workflow-status <task-id>          # Full detail for a specific workflow
+```
+
+### MCP Server Setup
+
+Registered automatically via `.claude/settings.json`. The platform must be running (`docker compose up -d`).
+
+**MCP tools exposed:**
+
+| Tool | Parameters | Purpose |
+|---|---|---|
+| `mcp__aiwf_platform__create_workflow` | `query`, `token_budget`, `cost_budget_usd` | Create + execute governed workflow |
+| `mcp__aiwf_platform__get_workflow_status` | `task_id` | Get workflow status and results |
+| `mcp__aiwf_platform__list_workflows` | `limit` | List recent workflow runs |
+| `mcp__aiwf_platform__get_cost_status` | `user_id` | Show budget and usage |
+
+Claude Code launches `python -m app.mcp.server` as a subprocess and communicates via JSON-RPC 2.0 over stdio.
+
+### CLI Usage
+
+```bash
+# Basic
+python -m app.cli "review deployment security"
+
+# With options
+python -m app.cli "analyze migration risks" --user-id demo-user --budget 20000 --cost-limit 10.0
+```
+
+### Security Hooks
+
+**PreToolUse — Security Firewall** (`.claude/hooks/security_firewall_v2.py`):
+- Runs before Bash, Edit, Write tool calls
+- Blocks: `rm -rf /`, `curl | bash`, destructive SQL, `~/.ssh`, `~/.aws`, `.env`
+- Detects: hardcoded secrets (GitHub tokens, API keys, AWS keys)
+
+**PostToolUse — Audit Logger** (`.claude/hooks/audit_logger_v2.py`):
+- Runs after every tool call, logs to `.claude/audit.jsonl`
+- Auto-redacts: passwords, secrets, tokens, keys
+
+### Agent Definitions
+
+| Agent | Read | Write | Execute | Network |
+|---|---|---|---|---|
+| **governor** | `/` | `.claude`, `docs` | `git` | Yes |
+| **frontend-dev** | `frontend`, `docs` | `frontend` | `npm`, `node`, `vitest` | No |
+| **backend-dev** | `api`, `infrastructure` | `api`, `docker` | `python`, `pytest`, `alembic` | Yes |
+| **security-auditor** | `/` | _(none)_ | `grep`, `bandit`, `safety` | No |
+| **design-director** | `frontend`, `docs` | `design-tokens.json` | `node`, `npx` | No |
+
+Fail-closed: if OPA is unreachable, access is denied.
+
+### Activating the Plugin
+
+1. Start platform: `docker compose up -d`
+2. Verify: `curl http://localhost:8000/health`
+3. Restart Claude Code — it reads `.claude/settings.json` on startup
+4. Test: type `/workflow "hello world"` in Claude Code
+
+### Plugin File Structure
+
+```
+.claude/
+  settings.json              MCP server + hook registration
+  skills/workflow.md         /workflow slash command
+  skills/workflow-status.md  /workflow-status slash command
+  agents/*.md                5 agent role definitions
+  hooks/security_firewall_v2.py  PreToolUse hook
+  hooks/audit_logger_v2.py       PostToolUse hook
+api/app/
+  mcp/server.py              MCP JSON-RPC server (4 tools)
+  mcp/backends/postgres.py   Real Postgres backend
+  mcp/backends/github.py     Real GitHub backend
+  cli.py                     CLI entry point
+```
+
+---
+
 ## Expected Results
 
 ### For End Users
@@ -346,8 +452,13 @@ infrastructure/
   grafana/                   Pre-built dashboards
 helm/aiwf/                   Kubernetes Helm chart
 .claude/
+  settings.json              MCP server + hook registration
+  skills/                    /workflow + /workflow-status slash commands
   agents/                    5 agent role definitions
   hooks/                     Security firewall + audit logger
+api/app/
+  mcp/                       MCP server + real backends (Postgres, GitHub)
+  cli.py                     CLI entry point
 ```
 
 ---
